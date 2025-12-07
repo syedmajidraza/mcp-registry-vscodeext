@@ -119,6 +119,67 @@ EOF
 
 ---
 
+
+## Using MCP Commands in VS Code
+
+This extension provides a set of MCP management commands directly in the chat panel and via the Command Palette. Developers can interact with company-approved MCP tools using simple chat commands.
+
+### How to Use MCP Commands
+
+1. **Open the Chat Panel**
+   - Mac: `Cmd+Shift+I`
+   - Windows/Linux: `Ctrl+Shift+I`
+   - Or: View → Chat
+
+2. **Type MCP Commands in Chat**
+   ```
+   @mcp /list                # List all available MCP servers
+   @mcp /install <name>      # Install a specific MCP server
+   @mcp /install-all         # Install all MCP servers
+   @mcp /start <name>        # Start a specific MCP server
+   @mcp /start-all           # Start all MCP servers
+   @mcp /stop <name>         # Stop a specific MCP server
+   @mcp /stop-all            # Stop all MCP servers
+   @mcp /uninstall <name>    # Uninstall a specific MCP server
+   @mcp /uninstall-all       # Uninstall all MCP servers
+   @mcp /status              # Show installed servers
+   @mcp /help                # Show all available commands
+   ```
+
+3. **You can also use commands without the slash:**
+   ```
+   @mcp list
+   @mcp install postman/mcp-server
+   @mcp uninstall postman/mcp-server
+   ```
+
+4. **Access via Command Palette (`Cmd+Shift+P`):**
+   - MCP Registry: Reload Tools
+   - MCP Registry: Show Available Tools
+   - MCP Registry: Configure URL
+
+### Example Workflow
+
+- To install all MCP servers:
+  ```
+  @mcp /install-all
+  ```
+- To start a specific server:
+  ```
+  @mcp /start postman/mcp-server
+  ```
+- To list available servers:
+  ```
+  @mcp /list
+  ```
+
+### Notes
+
+- All commands are processed by the extension (`extension.js`).
+- Registry URL and security settings are enforced automatically.
+- For troubleshooting, see the Output panel: View → Output → Extension Host.
+
+---
 ## Usage
 
 ### Basic Usage

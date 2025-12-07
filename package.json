@@ -3,6 +3,7 @@
   "displayName": "MCP Registry Chat",
   "description": "Chat using GitHub Copilot with tools from your local MCP registry",
   "version": "1.0.0",
+  "publisher": "yourcompany",
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -19,17 +20,7 @@
         "id": "mcp-registry",
         "name": "mcp",
         "description": "Chat with MCP registry tools using Copilot",
-        "isSticky": true,
-        "commands": [
-          {
-            "name": "reload",
-            "description": "Reload MCP registry"
-          },
-          {
-            "name": "tools",
-            "description": "Show available tools"
-          }
-        ]
+        "isSticky": true
       }
     ],
     "commands": [
@@ -59,6 +50,5 @@
   },
   "extensionDependencies": [
     "github.copilot-chat"
-  ],
-  "dependencies": {}
+  ]
 }
