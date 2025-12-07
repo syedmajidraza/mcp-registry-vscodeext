@@ -1,0 +1,64 @@
+{
+  "name": "mcp-registry-chat",
+  "displayName": "MCP Registry Chat",
+  "description": "Chat using GitHub Copilot with tools from your local MCP registry",
+  "version": "1.0.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Chat"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "mcp-registry",
+        "name": "mcp",
+        "description": "Chat with MCP registry tools using Copilot",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "reload",
+            "description": "Reload MCP registry"
+          },
+          {
+            "name": "tools",
+            "description": "Show available tools"
+          }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "mcp-registry.reload",
+        "title": "MCP Registry: Reload Tools"
+      },
+      {
+        "command": "mcp-registry.configure",
+        "title": "MCP Registry: Configure URL"
+      },
+      {
+        "command": "mcp-registry.showTools",
+        "title": "MCP Registry: Show Available Tools"
+      }
+    ],
+    "configuration": {
+      "title": "MCP Registry",
+      "properties": {
+        "chat.mcp.gallery.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "MCP Gallery is disabled by organization policy"
+        }
+      }
+    }
+  },
+  "extensionDependencies": [
+    "github.copilot-chat"
+  ],
+  "dependencies": {}
+}
