@@ -1,0 +1,1023 @@
+// extension.js - VS Code Extension for MCP Registry Integration
+// With server installation capabilities
+
+const vscode = require('vscode');
+const { Client } = require('pg');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const execAsync = promisify(exec);
+const fs = require('fs').promises;
+const path = require('path');
+const os = require('os');
+let postgresConnections = new Map();
+let currentConnection = null;
+let mcpTools = [];
+const REGISTRY_URL = 'http://localhost:8080/v0.1/servers';
+const MCP_SERVERS_DIR = path.join(os.homedir(), 'mcp-servers');
+
+/**
+ * Activate the extension
+ */
+async function activate(context) {
+    console.log('MCP Registry Extension is now active');
+    console.log(`Connecting to registry: ${REGISTRY_URL}`);
+
+    // Ensure MCP servers directory exists
+    await ensureMCPDirectory();
+
+    // Load tools from registry on activation
+    await loadMCPRegistry();
+
+    // Register chat participant with slash commands
+    const participant = vscode.chat.createChatParticipant('mcp-registry', async (request, context, stream, token) => {
+        try {
+            const prompt = request.prompt.trim();
+            const promptLower = prompt.toLowerCase();
+
+            // DEBUG: Always log
+            console.log('=== MCP CHAT REQUEST ===');
+            console.log('Original prompt:', prompt);
+            console.log('Lowercase:', promptLower);
+            console.log('Starts with /:', prompt.startsWith('/'));
+            // ===== DATABASE COMMANDS =====
+            if (promptLower.startsWith('db ') || prompt.startsWith('/db ')) {
+                await handleDatabaseCommand(prompt, stream);
+                return;
+            }
+            // ===== PRIORITY: SLASH COMMANDS FIRST =====
+            if (prompt.startsWith('/')) {
+                const command = prompt.slice(1).trim().toLowerCase();
+                console.log('🎯 SLASH COMMAND:', command);
+                
+                // List
+                if (command === 'list' || command === 'ls' || command === 'servers') {
+                    console.log('✅ Executing: list');
+                    await handleListCommand(stream);
+                    return;
+                }
+                
+                // Status
+                if (command === 'status' || command === 'installed') {
+                    console.log('✅ Executing: status');
+                    await handleStatusCommand(stream);
+                    return;
+                }
+                
+                // Install specific server
+                if (command.startsWith('install ')) {
+                    const serverName = command.replace('install ', '').trim();
+                    console.log('✅ Executing: install', serverName);
+                    await handleInstallCommand(serverName, stream);
+                    return;
+                }
+                
+                // Install all variants
+                if (command === 'install-all' || command === 'installall' || command === 'install all') {
+                    console.log('✅ Executing: install-all');
+                    await handleInstallAllCommand(stream);
+                    return;
+                }
+                
+                // Start server
+                if (command.startsWith('start ')) {
+                    const serverName = command.replace('start ', '').trim();
+                    console.log('✅ Executing: start', serverName);
+                    await handleStartCommand(serverName, stream);
+                    return;
+                }
+                
+                // Start all servers
+                if (command === 'start-all' || command === 'startall' || command === 'start all') {
+                    console.log('✅ Executing: start-all');
+                    await handleStartAllCommand(stream);
+                    return;
+                }
+                
+                // Stop server
+                if (command.startsWith('stop ')) {
+                    const serverName = command.replace('stop ', '').trim();
+                    console.log('✅ Executing: stop', serverName);
+                    await handleStopCommand(serverName, stream);
+                    return;
+                }
+                
+                // Stop all servers
+                if (command === 'stop-all' || command === 'stopall' || command === 'stop all') {
+                    console.log('✅ Executing: stop-all');
+                    await handleStopAllCommand(stream);
+                    return;
+                }
+                
+                // Restart server
+                if (command.startsWith('restart ')) {
+                    const serverName = command.replace('restart ', '').trim();
+                    console.log('✅ Executing: restart', serverName);
+                    await handleRestartCommand(serverName, stream);
+                    return;
+                }
+                
+                // Restart all servers
+                if (command === 'restart-all' || command === 'restartall' || command === 'restart all') {
+                    console.log('✅ Executing: restart-all');
+                    await handleRestartAllCommand(stream);
+                    return;
+                }
+                
+                // Uninstall
+                if (command.startsWith('uninstall ') || command.startsWith('remove ')) {
+                    const serverName = command.replace(/^(uninstall|remove)\s+/, '').trim();
+                    console.log('✅ Executing: uninstall', serverName);
+                    await handleUninstallCommand(serverName, stream);
+                    return;
+                }
+                
+                // Uninstall all
+                if (command === 'uninstall-all' || command === 'uninstallall' || command === 'uninstall all' ||
+                    command === 'remove-all' || command === 'removeall' || command === 'remove all') {
+                    console.log('✅ Executing: uninstall-all');
+                    await handleUninstallAllCommand(stream);
+                    return;
+                }
+                
+                // Help
+                if (command === 'help' || command === '?' || command === 'commands') {
+                    console.log('✅ Executing: help');
+                    await handleHelpCommand(stream);
+                    return;
+                }
+                
+                // Unknown slash command
+                console.log('❌ Unknown slash command');
+                stream.markdown(`❌ Unknown command: \`/${command}\`\n\n`);
+                stream.markdown(`Type \`@mcp /help\` for available commands.`);
+                return;
+            }
+            
+            // ===== NON-SLASH COMMANDS (exact match only) =====
+            console.log('📝 Not a slash command, checking exact matches...');
+            
+            // List
+            if (promptLower === 'list' || promptLower === 'servers' || promptLower === 'ls') {
+                console.log('✅ Executing: list (no slash)');
+                await handleListCommand(stream);
+                return;
+            }
+            
+            // Status
+            if (promptLower === 'status' || promptLower === 'installed') {
+                console.log('✅ Executing: status (no slash)');
+                await handleStatusCommand(stream);
+                return;
+            }
+            
+            // Help
+            if (promptLower === 'help' || promptLower === 'commands' || promptLower === '?') {
+                console.log('✅ Executing: help (no slash)');
+                await handleHelpCommand(stream);
+                return;
+            }
+            
+            // Install specific (exact match: "install servername")
+            const installMatch = prompt.match(/^install\s+(.+)$/i);
+            if (installMatch) {
+                console.log('✅ Executing: install (no slash)', installMatch[1]);
+                await handleInstallCommand(installMatch[1].trim(), stream);
+                return;
+            }
+            
+            // Install all (exact match)
+            if (promptLower === 'install all' || promptLower === 'install-all' || promptLower === 'installall') {
+                console.log('✅ Executing: install-all (no slash)');
+                await handleInstallAllCommand(stream);
+                return;
+            }
+            
+            // Uninstall (exact match)
+            const uninstallMatch = prompt.match(/^(uninstall|remove)\s+(.+)$/i);
+            if (uninstallMatch) {
+                console.log('✅ Executing: uninstall (no slash)', uninstallMatch[2]);
+                await handleUninstallCommand(uninstallMatch[2].trim(), stream);
+                return;
+            }
+
+            console.log('💬 Sending to Copilot (not a command)');
+
+            // Show available tools
+            if (mcpTools.length > 0) {
+                stream.markdown(`🛠️ *Using ${mcpTools.length} MCP tools from company registry*\n\n`);
+            }
+
+            // Get available language models
+            const models = await vscode.lm.selectChatModels({
+                vendor: 'copilot',
+                family: 'gpt-4'
+            });
+
+            if (models.length === 0) {
+                stream.markdown('❌ No language model available. Make sure GitHub Copilot is enabled.');
+                return;
+            }
+
+            const model = models[0];
+
+            // Build messages
+            const messages = [
+                vscode.LanguageModelChatMessage.User(`You have access to the following company-approved MCP tools: ${JSON.stringify(mcpTools, null, 2)}`)
+            ];
+
+            // Add conversation history
+            for (const historyItem of context.history) {
+                if (historyItem instanceof vscode.ChatRequestTurn) {
+                    messages.push(vscode.LanguageModelChatMessage.User(historyItem.prompt));
+                } else if (historyItem instanceof vscode.ChatResponseTurn) {
+                    const text = historyItem.response.map(r => 
+                        r instanceof vscode.ChatResponseMarkdownPart ? r.value.value : ''
+                    ).join('');
+                    messages.push(vscode.LanguageModelChatMessage.Assistant(text));
+                }
+            }
+
+            // Add current user message
+            messages.push(vscode.LanguageModelChatMessage.User(request.prompt));
+
+            // Send request to language model
+            const chatRequest = await model.sendRequest(messages, {}, token);
+
+            // Stream the response
+            for await (const fragment of chatRequest.text) {
+                stream.markdown(fragment);
+            }
+
+        } catch (error) {
+            if (error instanceof vscode.LanguageModelError) {
+                stream.markdown(`❌ Language model error: ${error.message}`);
+            } else {
+                console.error('MCP Error:', error);
+                stream.markdown(`❌ Error: ${error.message}`);
+            }
+        }
+    });
+
+    participant.iconPath = new vscode.ThemeIcon('server-process');
+
+    // Commands
+    let reloadCommand = vscode.commands.registerCommand('mcp-registry.reload', async () => {
+        await loadMCPRegistry();
+        vscode.window.showInformationMessage(`MCP Registry reloaded. Found ${mcpTools.length} tools.`);
+    });
+
+    let infoCommand = vscode.commands.registerCommand('mcp-registry.configure', async () => {
+        vscode.window.showInformationMessage(
+            `MCP Registry URL: ${REGISTRY_URL}\n\nThis is locked to ensure all developers use approved tools only.`,
+            { modal: true }
+        );
+    });
+
+    let showToolsCommand = vscode.commands.registerCommand('mcp-registry.showTools', async () => {
+        if (mcpTools.length === 0) {
+            vscode.window.showInformationMessage('No MCP tools loaded. Check registry connection.');
+        } else {
+            const toolList = mcpTools.map(t => `• ${t.name}: ${t.description}`).join('\n');
+            vscode.window.showInformationMessage(
+                `Available Company MCP Tools:\n\n${toolList}\n\nRegistry: ${REGISTRY_URL}`,
+                { modal: true }
+            );
+        }
+    });
+
+    context.subscriptions.push(participant, reloadCommand, infoCommand, showToolsCommand);
+
+    // Enforce MCP policy
+    setTimeout(async () => {
+        await enforceMCPPolicy();
+        
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('mcp') || 
+                e.affectsConfiguration('github.copilot.chat.mcp') ||
+                e.affectsConfiguration('chat.mcp.gallery')) {
+                console.warn('⚠️ User attempted to modify MCP settings');
+                vscode.window.showWarningMessage(
+                    '⚠️ MCP settings are managed by IT and will be reset to company policy.',
+                    'Understood'
+                );
+                setTimeout(() => enforceMCPPolicy(), 1000);
+            }
+        });
+    }, 2000);
+}
+
+/**
+ * Ensure MCP servers directory exists
+ */
+async function ensureMCPDirectory() {
+    try {
+        await fs.mkdir(MCP_SERVERS_DIR, { recursive: true });
+        console.log(`✅ MCP servers directory: ${MCP_SERVERS_DIR}`);
+    } catch (error) {
+        console.error('Failed to create MCP directory:', error);
+    }
+}
+
+/**
+ * Handle install command
+ */
+async function handleInstallCommand(serverName, stream) {
+    // Clean up server name
+    serverName = serverName.replace(/^install\s+/, '').trim();
+    
+    stream.markdown(`## Installing ${serverName}\n\n`);
+    stream.progress(`Installing ${serverName}...`);
+
+    // Find server in registry
+    const server = mcpTools.find(t => 
+        t.name.toLowerCase() === serverName.toLowerCase() ||
+        t.name.toLowerCase().includes(serverName.toLowerCase())
+    );
+    
+    if (!server) {
+        stream.markdown(`❌ Server "${serverName}" not found in registry.\n\nAvailable servers:\n`);
+        mcpTools.forEach(t => stream.markdown(`- \`${t.name}\`\n`));
+        stream.markdown(`\nUse: \`@mcp install <server-name>\``);
+        return;
+    }
+
+    try {
+        // Check if already installed
+        const serverDir = path.join(MCP_SERVERS_DIR, serverName.replace(/\//g, '-'));
+        const isInstalled = await checkIfInstalled(serverDir);
+        
+        if (isInstalled) {
+            stream.markdown(`⚠️ ${serverName} is already installed.\n\nLocation: \`${serverDir}\`\n\n`);
+            stream.markdown(`To reinstall: \`@mcp uninstall ${serverName}\` then install again.`);
+            return;
+        }
+
+        // Install the server
+        stream.markdown(`📦 Cloning repository...\n`);
+        
+        if (!server.repository) {
+            stream.markdown(`❌ No repository URL found for ${serverName}`);
+            return;
+        }
+
+        // Clone repository
+        await execAsync(`git clone ${server.repository} "${serverDir}"`, { 
+            cwd: MCP_SERVERS_DIR 
+        });
+        
+        stream.markdown(`✅ Repository cloned\n\n`);
+        stream.markdown(`📦 Installing dependencies...\n`);
+
+        // Install dependencies
+        await execAsync('npm install', { cwd: serverDir });
+        
+        stream.markdown(`✅ Dependencies installed\n\n`);
+
+        // Try to build
+        try {
+            await execAsync('npm run build', { cwd: serverDir });
+            stream.markdown(`✅ Build completed\n\n`);
+        } catch (buildError) {
+            // Build might not be needed
+            stream.markdown(`ℹ️ No build step needed\n\n`);
+        }
+
+        stream.markdown(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+        stream.markdown(`## ✅ Installation Complete!\n\n`);
+        stream.markdown(`**${serverName}** is now installed at:\n\`${serverDir}\`\n\n`);
+        stream.markdown(`### Next Steps:\n`);
+        stream.markdown(`1. The server is ready to use\n`);
+        stream.markdown(`2. Start it with: \`@mcp start ${serverName}\` (coming soon)\n`);
+        stream.markdown(`3. Or manually: \`cd ${serverDir} && npm start\`\n`);
+
+    } catch (error) {
+        stream.markdown(`\n❌ Installation failed: ${error.message}\n\n`);
+        stream.markdown(`Please check the error and try again, or contact support.`);
+    }
+}
+
+/**
+ * Handle install all command
+ */
+async function handleInstallAllCommand(stream) {
+    stream.markdown(`## Installing All MCP Servers\n\n`);
+    stream.markdown(`Found ${mcpTools.length} servers in registry:\n\n`);
+    
+    mcpTools.forEach(t => stream.markdown(`- ${t.name}\n`));
+    stream.markdown(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`);
+
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const server of mcpTools) {
+        stream.markdown(`\n### Installing ${server.name}...\n`);
+        
+        try {
+            const serverDir = path.join(MCP_SERVERS_DIR, server.name.replace(/\//g, '-'));
+            const isInstalled = await checkIfInstalled(serverDir);
+            
+            if (isInstalled) {
+                stream.markdown(`⚠️ Already installed, skipping\n`);
+                continue;
+            }
+
+            if (!server.repository) {
+                stream.markdown(`❌ No repository URL\n`);
+                failCount++;
+                continue;
+            }
+
+            // Clone
+            await execAsync(`git clone ${server.repository} "${serverDir}"`, { 
+                cwd: MCP_SERVERS_DIR 
+            });
+
+            // Install
+            await execAsync('npm install', { cwd: serverDir });
+
+            // Build
+            try {
+                await execAsync('npm run build', { cwd: serverDir });
+            } catch {}
+
+            stream.markdown(`✅ Installed successfully\n`);
+            successCount++;
+
+        } catch (error) {
+            stream.markdown(`❌ Failed: ${error.message}\n`);
+            failCount++;
+        }
+    }
+
+    stream.markdown(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    stream.markdown(`## Installation Summary\n\n`);
+    stream.markdown(`✅ Successful: ${successCount}\n`);
+    stream.markdown(`❌ Failed: ${failCount}\n\n`);
+    stream.markdown(`All servers installed in: \`${MCP_SERVERS_DIR}\`\n`);
+}
+
+/**
+ * Handle list command
+ */
+async function handleListCommand(stream) {
+    stream.markdown(`## Available MCP Servers\n\n`);
+    stream.markdown(`Connected to: \`${REGISTRY_URL}\`\n\n`);
+    
+    if (mcpTools.length === 0) {
+        stream.markdown(`❌ No servers found in registry.\n`);
+        return;
+    }
+
+    stream.markdown(`Found **${mcpTools.length}** server(s):\n\n`);
+    
+    for (const tool of mcpTools) {
+        const serverDir = path.join(MCP_SERVERS_DIR, tool.name.replace(/\//g, '-'));
+        const isInstalled = await checkIfInstalled(serverDir);
+        
+        const status = isInstalled ? '✅ Installed' : '⬜ Not installed';
+        
+        stream.markdown(`### ${tool.name} ${status}\n`);
+        stream.markdown(`${tool.description}\n`);
+        if (tool.repository) {
+            stream.markdown(`📦 [Repository](${tool.repository})\n`);
+        }
+        stream.markdown(`\n`);
+    }
+
+    stream.markdown(`\n**Commands:**\n`);
+    stream.markdown(`- Install: \`@mcp install <server-name>\`\n`);
+    stream.markdown(`- Install all: \`@mcp install all\`\n`);
+    stream.markdown(`- Check status: \`@mcp status\`\n`);
+}
+
+/**
+ * Handle status command
+ */
+async function handleStatusCommand(stream) {
+    stream.markdown(`## Installation Status\n\n`);
+    stream.markdown(`Servers directory: \`${MCP_SERVERS_DIR}\`\n\n`);
+
+    let installedCount = 0;
+    let notInstalledCount = 0;
+
+    for (const tool of mcpTools) {
+        const serverDir = path.join(MCP_SERVERS_DIR, tool.name.replace(/\//g, '-'));
+        const isInstalled = await checkIfInstalled(serverDir);
+        
+        if (isInstalled) {
+            stream.markdown(`✅ **${tool.name}** - Installed\n`);
+            stream.markdown(`   Location: \`${serverDir}\`\n\n`);
+            installedCount++;
+        } else {
+            stream.markdown(`⬜ **${tool.name}** - Not installed\n\n`);
+            notInstalledCount++;
+        }
+    }
+
+    stream.markdown(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    stream.markdown(`**Summary:** ${installedCount} installed, ${notInstalledCount} not installed\n\n`);
+    
+    if (notInstalledCount > 0) {
+        stream.markdown(`To install missing servers: \`@mcp install all\`\n`);
+    }
+}
+
+/**
+ * Handle start command
+ */
+async function handleStartCommand(serverName, stream) {
+    stream.markdown(`## Starting ${serverName}\n\n`);
+    stream.progress(`Starting ${serverName}...`);
+
+    const serverDir = path.join(MCP_SERVERS_DIR, serverName.replace(/\//g, '-'));
+    const isInstalled = await checkIfInstalled(serverDir);
+    
+    if (!isInstalled) {
+        stream.markdown(`❌ ${serverName} is not installed.\n\n`);
+        stream.markdown(`Install it first: \`@mcp /install ${serverName}\``);
+        return;
+    }
+
+    try {
+        // Check if package.json exists
+        const packageJsonPath = path.join(serverDir, 'package.json');
+        await fs.access(packageJsonPath);
+
+        stream.markdown(`📦 Starting server...\n`);
+
+        // Start server in background
+        const child = exec('npm start', { 
+            cwd: serverDir,
+            detached: true,
+            stdio: 'ignore'
+        });
+
+        child.unref(); // Let it run independently
+
+        stream.markdown(`✅ Server started!\n\n`);
+        stream.markdown(`**${serverName}** is now running in the background.\n\n`);
+        stream.markdown(`Log file: \`${path.join(MCP_SERVERS_DIR, 'logs', serverName.replace(/\//g, '-') + '.log')}\`\n\n`);
+        stream.markdown(`To stop: \`@mcp /stop ${serverName}\``);
+
+    } catch (error) {
+        stream.markdown(`❌ Failed to start: ${error.message}\n`);
+    }
+}
+
+/**
+ * Handle start all command
+ */
+async function handleStartAllCommand(stream) {
+    stream.markdown(`## Starting All Installed Servers\n\n`);
+
+    let startedCount = 0;
+    let failedCount = 0;
+
+    for (const tool of mcpTools) {
+        const serverDir = path.join(MCP_SERVERS_DIR, tool.name.replace(/\//g, '-'));
+        const isInstalled = await checkIfInstalled(serverDir);
+        
+        if (!isInstalled) {
+            stream.markdown(`⚠️ **${tool.name}** - Not installed, skipping\n`);
+            continue;
+        }
+
+        stream.markdown(`\n### Starting ${tool.name}...\n`);
+
+        try {
+            // Start server
+            const child = exec('npm start', { 
+                cwd: serverDir,
+                detached: true,
+                stdio: 'ignore'
+            });
+            child.unref();
+
+            stream.markdown(`✅ Started\n`);
+            startedCount++;
+
+        } catch (error) {
+            stream.markdown(`❌ Failed: ${error.message}\n`);
+            failedCount++;
+        }
+    }
+
+    stream.markdown(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    stream.markdown(`## Summary\n\n`);
+    stream.markdown(`✅ Started: ${startedCount}\n`);
+    stream.markdown(`❌ Failed: ${failedCount}\n\n`);
+    stream.markdown(`To stop all: \`@mcp /stop-all\`\n`);
+}
+
+/**
+ * Handle stop command
+ */
+async function handleStopCommand(serverName, stream) {
+    stream.markdown(`## Stopping ${serverName}\n\n`);
+
+    try {
+        // Kill processes related to this server
+        await execAsync(`pkill -f "npm.*${serverName}"`).catch(() => {
+            // Process might not be running, that's ok
+        });
+
+        stream.markdown(`✅ Server stopped.\n`);
+
+    } catch (error) {
+        stream.markdown(`❌ Failed to stop: ${error.message}\n`);
+    }
+}
+
+/**
+ * Handle stop all command  
+ */
+async function handleStopAllCommand(stream) {
+    stream.markdown(`## Stopping All MCP Servers\n\n`);
+
+    try {
+        // Kill all npm processes in mcp-servers directory
+        await execAsync('pkill -f "npm.*mcp-servers"').catch(() => {});
+
+        // Kill common MCP server ports
+        const ports = [3000, 3001, 3002, 3003, 3004];
+        for (const port of ports) {
+            try {
+                await execAsync(`lsof -ti:${port} | xargs kill -9`);
+            } catch {}
+        }
+
+        stream.markdown(`✅ All servers stopped.\n`);
+
+    } catch (error) {
+        stream.markdown(`❌ Error: ${error.message}\n`);
+    }
+}
+
+/**
+ * Handle restart command
+ */
+async function handleRestartCommand(serverName, stream) {
+    stream.markdown(`## Restarting ${serverName}\n\n`);
+
+    const serverDir = path.join(MCP_SERVERS_DIR, serverName.replace(/\//g, '-'));
+    const isInstalled = await checkIfInstalled(serverDir);
+    
+    if (!isInstalled) {
+        stream.markdown(`❌ ${serverName} is not installed.\n\n`);
+        stream.markdown(`Install it first: \`@mcp /install ${serverName}\``);
+        return;
+    }
+
+    try {
+        // Step 1: Stop
+        stream.markdown(`🛑 Stopping server...\n`);
+        await execAsync(`pkill -f "npm.*${serverName}"`).catch(() => {});
+        
+        // Wait a moment
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Step 2: Start
+        stream.markdown(`🚀 Starting server...\n`);
+        
+        const child = exec('npm start', { 
+            cwd: serverDir,
+            detached: true,
+            stdio: 'ignore'
+        });
+        child.unref();
+
+        stream.markdown(`\n✅ Server restarted!\n\n`);
+        stream.markdown(`**${serverName}** is now running.\n`);
+
+    } catch (error) {
+        stream.markdown(`❌ Failed to restart: ${error.message}\n`);
+    }
+}
+
+/**
+ * Handle restart all command
+ */
+async function handleRestartAllCommand(stream) {
+    stream.markdown(`## Restarting All Installed Servers\n\n`);
+
+    // Step 1: Stop all
+    stream.markdown(`🛑 Stopping all servers...\n`);
+    try {
+        await execAsync('pkill -f "npm.*mcp-servers"').catch(() => {});
+        const ports = [3000, 3001, 3002, 3003, 3004];
+        for (const port of ports) {
+            try {
+                await execAsync(`lsof -ti:${port} | xargs kill -9`);
+            } catch {}
+        }
+    } catch {}
+    
+    stream.markdown(`✅ All servers stopped\n\n`);
+
+    // Wait a moment
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Step 2: Start all
+    stream.markdown(`🚀 Starting all servers...\n\n`);
+
+    let startedCount = 0;
+    let failedCount = 0;
+
+    for (const tool of mcpTools) {
+        const serverDir = path.join(MCP_SERVERS_DIR, tool.name.replace(/\//g, '-'));
+        const isInstalled = await checkIfInstalled(serverDir);
+        
+        if (!isInstalled) {
+            continue;
+        }
+
+        stream.markdown(`### ${tool.name}...\n`);
+
+        try {
+            const child = exec('npm start', { 
+                cwd: serverDir,
+                detached: true,
+                stdio: 'ignore'
+            });
+            child.unref();
+
+            stream.markdown(`✅ Restarted\n\n`);
+            startedCount++;
+
+        } catch (error) {
+            stream.markdown(`❌ Failed: ${error.message}\n\n`);
+            failedCount++;
+        }
+    }
+
+    stream.markdown(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    stream.markdown(`## Summary\n\n`);
+    stream.markdown(`✅ Restarted: ${startedCount}\n`);
+    stream.markdown(`❌ Failed: ${failedCount}\n`);
+}
+async function handleUninstallCommand(serverName, stream) {
+    // Clean up server name
+    serverName = serverName.replace(/^(uninstall|remove)\s+/, '').trim();
+    
+    stream.markdown(`## Uninstalling ${serverName}\n\n`);
+
+    const serverDir = path.join(MCP_SERVERS_DIR, serverName.replace(/\//g, '-'));
+    const isInstalled = await checkIfInstalled(serverDir);
+    
+    if (!isInstalled) {
+        stream.markdown(`❌ ${serverName} is not installed.\n`);
+        return;
+    }
+
+    try {
+        await fs.rm(serverDir, { recursive: true, force: true });
+        stream.markdown(`✅ ${serverName} has been uninstalled.\n\n`);
+        stream.markdown(`Removed directory: \`${serverDir}\`\n`);
+    } catch (error) {
+        stream.markdown(`❌ Failed to uninstall: ${error.message}\n`);
+    }
+}
+
+/**
+ * Handle help command
+ */
+async function handleHelpCommand(stream) {
+    stream.markdown(`## MCP Registry Commands\n\n`);
+    stream.markdown(`Use **slash commands** for best results:\n\n`);
+    
+    stream.markdown(`### Installation\n`);
+    stream.markdown(`- \`@mcp /install <server-name>\` - Install a specific server\n`);
+    stream.markdown(`- \`@mcp /install-all\` - Install all servers from registry\n`);
+    stream.markdown(`- \`@mcp /uninstall <server-name>\` - Remove a specific server\n`);
+    stream.markdown(`- \`@mcp /uninstall-all\` - Remove all installed servers\n\n`);
+    
+    stream.markdown(`### Server Management\n`);
+    stream.markdown(`- \`@mcp /start <server-name>\` - Start a specific server\n`);
+    stream.markdown(`- \`@mcp /start-all\` - Start all installed servers\n`);
+    stream.markdown(`- \`@mcp /stop <server-name>\` - Stop a specific server\n`);
+    stream.markdown(`- \`@mcp /stop-all\` - Stop all running servers\n`);
+    stream.markdown(`- \`@mcp /restart <server-name>\` - Restart a specific server\n`);
+    stream.markdown(`- \`@mcp /restart-all\` - Restart all installed servers\n\n`);
+    
+    stream.markdown(`### Information\n`);
+    stream.markdown(`- \`@mcp /list\` - List all available servers\n`);
+    stream.markdown(`- \`@mcp /status\` - Show installation status\n`);
+    stream.markdown(`- \`@mcp /help\` - Show this help\n\n`);
+    
+    stream.markdown(`### Examples\n`);
+    stream.markdown(`\`\`\`\n`);
+    stream.markdown(`@mcp /list\n`);
+    stream.markdown(`@mcp /install postman/mcp-server\n`);
+    stream.markdown(`@mcp /start postman/mcp-server\n`);
+    stream.markdown(`@mcp /restart postman/mcp-server\n`);
+    stream.markdown(`@mcp /stop postman/mcp-server\n`);
+    stream.markdown(`@mcp /start-all\n`);
+    stream.markdown(`@mcp /restart-all\n`);
+    stream.markdown(`@mcp /status\n`);
+    stream.markdown(`\`\`\`\n\n`);
+    
+    stream.markdown(`💡 **Tip:** You can also use commands without the slash for some commands\n\n`);
+    
+    stream.markdown(`Servers are installed in: \`${MCP_SERVERS_DIR}\`\n`);
+}
+
+/**
+ * Check if server is installed
+ */
+async function checkIfInstalled(serverDir) {
+    try {
+        await fs.access(serverDir);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Load tools from company MCP registry
+ */
+async function loadMCPRegistry() {
+    try {
+        const http = require('http');
+        const url = require('url');
+
+        const parsedUrl = url.parse(REGISTRY_URL);
+
+        const response = await new Promise((resolve, reject) => {
+            const req = http.get(REGISTRY_URL, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                    try {
+                        resolve(JSON.parse(data));
+                    } catch (e) {
+                        reject(new Error('Invalid JSON response from registry'));
+                    }
+                });
+            });
+            req.on('error', reject);
+            req.setTimeout(10000, () => {
+                req.destroy();
+                reject(new Error('Registry connection timeout'));
+            });
+        });
+
+        mcpTools = response.servers.map(item => {
+            const server = item.server;
+            return {
+                name: server.name,
+                description: server.description || `Tools from ${server.name}`,
+                repository: server.repository?.url || null,
+                version: server.version || 'Unknown'
+            };
+        });
+
+        console.log(`✅ Loaded ${mcpTools.length} tools from company MCP registry`);
+        
+        vscode.window.showInformationMessage(
+            `✅ Connected to company MCP registry! Found ${mcpTools.length} approved tool(s).`
+        );
+    } catch (error) {
+        console.error('❌ Failed to load MCP registry:', error);
+        vscode.window.showErrorMessage(
+            `❌ Cannot connect to company MCP registry at ${REGISTRY_URL}.\n\nError: ${error.message}`
+        );
+        mcpTools = [];
+    }
+}
+
+/**
+ * Enforce MCP policy
+ */
+async function enforceMCPPolicy() {
+    try {
+        const config = vscode.workspace.getConfiguration();
+        
+        await config.update('mcp.servers', {}, vscode.ConfigurationTarget.Global);
+        await config.update('mcp.servers', {}, vscode.ConfigurationTarget.Workspace);
+        await config.update('chat.mcp.gallery.enabled', false, vscode.ConfigurationTarget.Global);
+        await config.update('chat.mcp.gallery.enabled', false, vscode.ConfigurationTarget.Workspace);
+        await config.update('github.copilot.chat.mcp.enabled', false, vscode.ConfigurationTarget.Global);
+        await config.update('github.copilot.chat.mcp.enabled', false, vscode.ConfigurationTarget.Workspace);
+        
+        console.log('✅ Company MCP policy enforced');
+    } catch (error) {
+        console.error('Failed to enforce MCP policy:', error);
+    }
+}
+
+function deactivate() {
+    console.log('MCP Registry Extension deactivated');
+}
+
+module.exports = {
+    activate,
+    deactivate
+};
+/**
+ * Handle uninstall all command
+ */
+async function handleUninstallAllCommand(stream) {
+    stream.markdown(`## Uninstalling All MCP Servers\n\n`);
+    stream.markdown(`⚠️  This will remove all installed servers.\n\n`);
+    stream.markdown(`🛑 Stopping all servers...\n`);
+    try {
+        await execAsync('pkill -f "npm.*mcp-servers"').catch(() => {});
+    } catch {}
+    stream.markdown(`✅ Servers stopped\n\n`);
+    let removedCount = 0;
+    let failedCount = 0;
+    for (const tool of mcpTools) {
+        const serverDir = path.join(MCP_SERVERS_DIR, tool.name.replace(/\//g, '-'));
+        const isInstalled = await checkIfInstalled(serverDir);
+        if (!isInstalled) continue;
+        stream.markdown(`### Uninstalling ${tool.name}...\n`);
+        try {
+            await fs.rm(serverDir, { recursive: true, force: true });
+            stream.markdown(`✅ Removed\n\n`);
+            removedCount++;
+        } catch (error) {
+            stream.markdown(`❌ Failed: ${error.message}\n\n`);
+            failedCount++;
+        }
+    }
+    stream.markdown(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    stream.markdown(`## Summary\n\n`);
+    stream.markdown(`✅ Removed: ${removedCount}\n`);
+    stream.markdown(`❌ Failed: ${failedCount}\n\n`);
+    if (removedCount > 0) {
+        stream.markdown(`All servers have been uninstalled from: \`${MCP_SERVERS_DIR}\`\n`);
+    }
+}
+
+/**
+ * Handle uninstall all command
+ */
+async function handleUninstallAllCommand(stream) {
+    stream.markdown(`## Uninstalling All MCP Servers\n\n`);
+    stream.markdown(`⚠️  This will remove all installed servers.\n\n`);
+    stream.markdown(`🛑 Stopping all servers...\n`);
+    try {
+        await execAsync('pkill -f "npm.*mcp-servers"').catch(() => {});
+    } catch {}
+    stream.markdown(`✅ Servers stopped\n\n`);
+    let removedCount = 0;
+    let failedCount = 0;
+    for (const tool of mcpTools) {
+        const serverDir = path.join(MCP_SERVERS_DIR, tool.name.replace(/\//g, '-'));
+        const isInstalled = await checkIfInstalled(serverDir);
+        if (!isInstalled) continue;
+        stream.markdown(`### Uninstalling ${tool.name}...\n`);
+        try {
+            await fs.rm(serverDir, { recursive: true, force: true });
+            stream.markdown(`✅ Removed\n\n`);
+            removedCount++;
+        } catch (error) {
+            stream.markdown(`❌ Failed: ${error.message}\n\n`);
+            failedCount++;
+        }
+    }
+    stream.markdown(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    stream.markdown(`## Summary\n\n`);
+    stream.markdown(`✅ Removed: ${removedCount}\n`);
+    stream.markdown(`❌ Failed: ${failedCount}\n\n`);
+    if (removedCount > 0) {
+        stream.markdown(`All servers have been uninstalled from: \`${MCP_SERVERS_DIR}\`\n`);
+    }
+}
+
+/**
+ * Handle uninstall all command
+ */
+async function handleUninstallAllCommand(stream) {
+    stream.markdown(`## Uninstalling All MCP Servers\n\n`);
+    stream.markdown(`⚠️  This will remove all installed servers.\n\n`);
+    stream.markdown(`🛑 Stopping all servers...\n`);
+    try {
+        await execAsync('pkill -f "npm.*mcp-servers"').catch(() => {});
+    } catch {}
+    stream.markdown(`✅ Servers stopped\n\n`);
+    let removedCount = 0;
+    let failedCount = 0;
+    for (const tool of mcpTools) {
+        const serverDir = path.join(MCP_SERVERS_DIR, tool.name.replace(/\//g, '-'));
+        const isInstalled = await checkIfInstalled(serverDir);
+        if (!isInstalled) continue;
+        stream.markdown(`### Uninstalling ${tool.name}...\n`);
+        try {
+            await fs.rm(serverDir, { recursive: true, force: true });
+            stream.markdown(`✅ Removed\n\n`);
+            removedCount++;
+        } catch (error) {
+            stream.markdown(`❌ Failed: ${error.message}\n\n`);
+            failedCount++;
+        }
+    }
+    stream.markdown(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    stream.markdown(`## Summary\n\n`);
+    stream.markdown(`✅ Removed: ${removedCount}\n`);
+    stream.markdown(`❌ Failed: ${failedCount}\n\n`);
+    if (removedCount > 0) {
+        stream.markdown(`All servers have been uninstalled from: \`${MCP_SERVERS_DIR}\`\n`);
+    }
+}
